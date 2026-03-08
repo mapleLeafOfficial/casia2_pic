@@ -55,12 +55,14 @@ class CASIAv2Dataset(Dataset):
         train_ratio: float = 0.7,
         val_ratio: float = 0.15,
         seed: int = 42,
+        drop_tampered_without_mask: bool = True,
     ):
         super().__init__()
         self.root_dir = Path(root_dir)
         self.transform = transform
         self.target_size = target_size
         self.split = split
+        self.drop_tampered_without_mask = drop_tampered_without_mask
 
         # 收集图像路径和标签
         self.samples: List[Dict] = []
@@ -74,6 +76,7 @@ class CASIAv2Dataset(Dataset):
         au_dir = self.root_dir / "Au"  # 真实图像目录
         tp_dir = self.root_dir / "Tp"  # 篡改图像目录
         mask_dir = self.root_dir / "mask"  # 掩码目录（可选）
+        skipped_tampered = 0
 
         # 支持的图像格式
         img_extensions = ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.tif")
@@ -95,6 +98,13 @@ class CASIAv2Dataset(Dataset):
                 for img_path in sorted(tp_dir.glob(ext)):
                     # 尝试匹配对应的掩码文件
                     mask_path = self._find_mask(img_path, mask_dir)
+                    if (
+                        self.drop_tampered_without_mask
+                        and mask_dir.exists()
+                        and mask_path is None
+                    ):
+                        skipped_tampered += 1
+                        continue
 
                     # 根据文件名判断篡改类型
                     tamper_type = self._infer_tamper_type(img_path.name)
@@ -105,6 +115,11 @@ class CASIAv2Dataset(Dataset):
                         "label": 1,  # 1 = 篡改
                         "tamper_type": tamper_type,
                     })
+        if skipped_tampered > 0:
+            print(
+                f"[CASIA] 跳过 {skipped_tampered} 张无掩码篡改样本 "
+                f"(split={self.split}, root={self.root_dir})"
+            )
 
     def _find_mask(self, img_path: Path, mask_dir: Path) -> Optional[str]:
         """
@@ -118,10 +133,15 @@ class CASIAv2Dataset(Dataset):
         stem = img_path.stem
         # 常见的掩码命名模式
         candidates = [
+            mask_dir / f"{stem}.tif",
+            mask_dir / f"{stem}.jpg",
+            mask_dir / f"{stem}.jpeg",
             mask_dir / f"{stem}.png",
             mask_dir / f"{stem}.bmp",
+            mask_dir / f"{stem}_mask.tif",
             mask_dir / f"{stem}_mask.png",
             mask_dir / f"{stem}_gt.png",
+            mask_dir / f"{stem}_gt.tif",
         ]
 
         for candidate in candidates:
@@ -307,8 +327,10 @@ class NIST16Dataset(Dataset):
 
         stem = img_path.stem
         candidates = [
+            mask_dir / f"{stem}.tif",
             mask_dir / f"{stem}.png",
             mask_dir / f"{stem}.bmp",
+            mask_dir / f"{stem}_mask.tif",
             mask_dir / f"{stem}_mask.png",
             mask_dir / f"{stem}_mask.bmp",
         ]
@@ -429,6 +451,7 @@ def create_dataloaders(
     num_workers: int = 4,
     transform=None,
     seed: int = 42,
+    drop_tampered_without_mask: bool = True,
 ) -> Dict[str, DataLoader]:
     """
     创建训练、验证和测试数据加载器的便捷函数
@@ -461,6 +484,7 @@ def create_dataloaders(
                     target_size=target_size,
                     split=split,
                     seed=seed,
+                    drop_tampered_without_mask=drop_tampered_without_mask,
                 )
             )
 
@@ -490,7 +514,8 @@ def create_dataloaders(
             batch_size=batch_size,
             shuffle=(split == "train"),
             num_workers=num_workers,
-            pin_memory=True,
+            pin_memory=torch.cuda.is_available(),
+            persistent_workers=(num_workers > 0),
             drop_last=(split == "train"),
         )
 

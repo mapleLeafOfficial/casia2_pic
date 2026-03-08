@@ -84,6 +84,8 @@ class Trainer:
         checkpoint_dir: str = "models/checkpoints",
         max_epochs: int = 100,
         patience: int = 15,
+        accumulation_steps: int = 1,
+        use_amp: bool = True,
     ):
         self.model = model.to(device)
         self.criterion = criterion
@@ -92,6 +94,13 @@ class Trainer:
         self.checkpoint_dir = Path(checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.max_epochs = max_epochs
+        self.accumulation_steps = max(1, accumulation_steps)
+        self.use_amp = (
+            use_amp
+            and str(device).startswith("cuda")
+            and torch.cuda.is_available()
+        )
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
 
         # 学习率调度器
         self.scheduler = CosineAnnealingLR(optimizer, T_max=max_epochs, eta_min=1e-6)
@@ -103,6 +112,35 @@ class Trainer:
         self.history = {"train_loss": [], "val_loss": [], "val_f1": [], "lr": []}
         self.best_val_loss = float("inf")
 
+    def _compute_losses_and_probs(
+        self,
+        output: Dict[str, torch.Tensor],
+        masks: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        统一处理 logits/prob 输出，返回损失与概率图。
+        """
+        if "logits" in output:
+            logits = output["logits"]
+            if logits.shape[2:] != masks.shape[2:]:
+                logits = torch.nn.functional.interpolate(
+                    logits, size=masks.shape[2:],
+                    mode="bilinear", align_corners=False
+                )
+            losses = self.criterion(logits, masks)
+            probs = torch.sigmoid(logits)
+        else:
+            probs = output["pred"]
+            if probs.shape[2:] != masks.shape[2:]:
+                probs = torch.nn.functional.interpolate(
+                    probs, size=masks.shape[2:],
+                    mode="bilinear", align_corners=False
+                )
+            logits = torch.logit(probs.clamp(1e-4, 1 - 1e-4))
+            losses = self.criterion(logits, masks)
+
+        return {"losses": losses, "probs": probs}
+
     def train_epoch(self, train_loader: DataLoader) -> Dict[str, float]:
         """执行一个训练 epoch"""
         self.model.train()
@@ -111,36 +149,28 @@ class Trainer:
         total_dice = 0.0
         num_batches = 0
 
-        for batch in train_loader:
-            images = batch["image"].to(self.device)
-            masks = batch["mask"].to(self.device)
+        self.optimizer.zero_grad(set_to_none=True)
+        for step, batch in enumerate(train_loader, start=1):
+            images = batch["image"].to(self.device, non_blocking=True)
+            masks = batch["mask"].to(self.device, non_blocking=True)
 
-            # 前向传播
-            output = self.model(images)
+            with torch.cuda.amp.autocast(enabled=self.use_amp):
+                output = self.model(images)
+                computed = self._compute_losses_and_probs(output, masks)
+                losses = computed["losses"]
+                loss = losses["total"] / self.accumulation_steps
 
-            # 计算损失（使用 logits，未经 sigmoid）
-            if "logits" in output:
-                # 将 logits 上采样到 mask 尺寸后计算损失
-                logits = output["logits"]
-                if logits.shape[2:] != masks.shape[2:]:
-                    logits = torch.nn.functional.interpolate(
-                        logits, size=masks.shape[2:],
-                        mode="bilinear", align_corners=False
-                    )
-                losses = self.criterion(logits, masks)
-            else:
-                losses = self.criterion(output["pred"], masks)
+            self.scaler.scale(loss).backward()
 
-            loss = losses["total"]
+            if step % self.accumulation_steps == 0 or step == len(train_loader):
+                self.scaler.unscale_(self.optimizer)
+                # 梯度裁剪，防止梯度爆炸
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self.optimizer.zero_grad(set_to_none=True)
 
-            # 反向传播
-            self.optimizer.zero_grad()
-            loss.backward()
-            # 梯度裁剪，防止梯度爆炸
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            self.optimizer.step()
-
-            total_loss += loss.item()
+            total_loss += losses["total"].item()
             total_bce += losses["bce"].item()
             total_dice += losses["dice"].item()
             num_batches += 1
@@ -160,27 +190,19 @@ class Trainer:
         num_batches = 0
 
         for batch in val_loader:
-            images = batch["image"].to(self.device)
-            masks = batch["mask"].to(self.device)
+            images = batch["image"].to(self.device, non_blocking=True)
+            masks = batch["mask"].to(self.device, non_blocking=True)
 
-            output = self.model(images)
-
-            # 损失
-            if "logits" in output:
-                logits = output["logits"]
-                if logits.shape[2:] != masks.shape[2:]:
-                    logits = torch.nn.functional.interpolate(
-                        logits, size=masks.shape[2:],
-                        mode="bilinear", align_corners=False
-                    )
-                losses = self.criterion(logits, masks)
-            else:
-                losses = self.criterion(output["pred"], masks)
+            with torch.cuda.amp.autocast(enabled=self.use_amp):
+                output = self.model(images)
+                computed = self._compute_losses_and_probs(output, masks)
+                losses = computed["losses"]
+                probs = computed["probs"]
 
             total_loss += losses["total"].item()
 
             # 像素级 F1-score
-            pred_binary = (output["pred"] > 0.5).float()
+            pred_binary = (probs > 0.5).float()
             f1 = self._pixel_f1(pred_binary, masks)
             total_f1 += f1
 
