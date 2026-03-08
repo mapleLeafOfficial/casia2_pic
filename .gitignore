@@ -27,13 +27,13 @@ env/
 openspec/
 
 # Logs / runtime
-logs/
+/logs/
 *.log
 
 # Data / checkpoints / outputs
-data/
-models/
-outputs/
+/data/
+/models/
+/outputs/
 casia2groundtruth-master/
 coverage-master/
 OneDrive_2_2026-3-8/
