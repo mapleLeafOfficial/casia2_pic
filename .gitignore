@@ -1,0 +1,53 @@
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+venv_*/
+env/
+
+# Local agent / tooling
+.agent/
+.claude/
+.codex/
+openspec/
+
+# Logs / runtime
+logs/
+*.log
+
+# Data / checkpoints / outputs
+data/
+models/
+outputs/
+casia2groundtruth-master/
+coverage-master/
+OneDrive_2_2026-3-8/
+
+# Archives / large binaries
+*.zip
+*.7z
+*.tar
+*.gz
+*.rar
+*.pth
+*.pt
+*.onnx
+*.mat
+
+# Notebook temporary files
+.ipynb_checkpoints/

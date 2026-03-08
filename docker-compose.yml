@@ -1,0 +1,33 @@
+# =============================================================================
+# Docker Compose 配置 - 图像篡改检测系统
+# 用法：docker compose up --build
+# =============================================================================
+
+version: "3.9"
+
+services:
+  # 深度学习训练/推理后端
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tampering-detection-backend
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./data:/app/data                    # 数据集挂载
+      - ./models:/app/models                # 模型检查点挂载
+      - ./logs:/app/logs                    # 训练日志
+      - ./outputs:/app/outputs              # 检测结果输出
+    environment:
+      - FLASK_APP=src/backend/app.py
+      - FLASK_ENV=development
+      - CUDA_VISIBLE_DEVICES=0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
